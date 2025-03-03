@@ -120,18 +120,16 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
     InstanceMaterialData(
       (1..=1000)
         .flat_map(|x| {
-          (1..=10000).map(move |y| (x as f32 / 10.0, y as f32 / 10.0))
+          (1..=1000).map(move |y| (x as f32 / 10.0, y as f32 / 10.0))
         })
         .map(|(_, _)| InstanceData {
           position: Vec3::new(
-            get_random_ft(-1000.0, 1000.0),
-            get_random_ft(-1000.0, 1000.0),
-            get_random_ft(-1000.0, 1000.0),
+            get_random_ft(-100.0, 100.0),
+            get_random_ft(-100.0, 100.0),
+            get_random_ft(-100.0, 100.0),
           ),
           scale: 1.0,
-          color: Color::WHITE.to_srgba().to_f32_array().map(|x| {
-            x as i8
-          }),
+          color: Color::WHITE.to_srgba().to_f32_array(),
         })
         .collect(),
     ),
@@ -193,7 +191,7 @@ impl Plugin for CustomMaterialPlugin {
 struct InstanceData {
   position: Vec3,
   scale: f32,
-  color: [i8; 4],
+  color: [f32; 4],
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -303,13 +301,13 @@ impl SpecializedMeshPipeline for CustomPipeline {
       step_mode: VertexStepMode::Instance,
       attributes: vec![
         VertexAttribute {
-          format: VertexFormat::Float16x4,
+          format: VertexFormat::Float32x4,
           offset: 0,
           shader_location: 3, // shader locations 0-2 are taken up by Position, Normal and UV attributes
         },
         VertexAttribute {
-          format: VertexFormat::Float16x4,
-          offset: VertexFormat::Float16x4.size(),
+          format: VertexFormat::Float32x4,
+          offset: VertexFormat::Float32x4.size(),
           shader_location: 4,
         },
       ],
