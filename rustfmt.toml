@@ -1,0 +1,4 @@
+indent_width = 2
+tab_spaces = 2
+max_width = 80
+use_small_heuristics = "Max"  # Options are "Off", "Max", or "Default"
