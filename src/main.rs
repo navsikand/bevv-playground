@@ -99,6 +99,8 @@ use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bytemuck::{Pod, Zeroable};
 use rand::{distributions::Uniform, prelude::Distribution};
 
+const NUM_PARTICLES: u32 = 1_000_000;
+
 fn get_random_ft(x: f32, y: f32) -> f32 {
   let between = Uniform::from(x..y);
   let mut rng = rand::thread_rng();
@@ -115,6 +117,7 @@ fn main() {
 }
 
 fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
+  let xy: u32 = (NUM_PARTICLES as f64).sqrt() as u32;
   // Build a single mesh to be instanced many times.
   commands.spawn((
     Mesh3d(meshes.add(SphereMeshBuilder {
@@ -122,10 +125,8 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
       kind: bevy::render::mesh::SphereKind::Uv { sectors: 2, stacks: 2 },
     })),
     InstanceMaterialData(
-      (1..=4132)
-        .flat_map(|x| {
-          (1..=4132).map(move |y| (x as f32 / 10.0, y as f32 / 10.0))
-        })
+      (1..=xy)
+        .flat_map(|x| (1..=xy).map(move |y| (x as f32 / 10.0, y as f32 / 10.0)))
         .map(|_| InstanceData {
           position: Vec3::new(
             get_random_ft(-500.0, 500.0),

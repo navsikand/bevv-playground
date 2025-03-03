@@ -1,3 +1,5 @@
+to set number of particles, go to `src/main.rs` and set `NUM_PARTICLES` to whatever you want the number of particles to be
+
 to run in release mode, do
 
 `cargo run --release`
