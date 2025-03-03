@@ -74,7 +74,7 @@ use bevy::{
     extract_component::{ExtractComponent, ExtractComponentPlugin},
     mesh::{
       allocator::MeshAllocator, MeshVertexBufferLayoutRef, RenderMesh,
-      RenderMeshBufferInfo,
+      RenderMeshBufferInfo, SphereMeshBuilder,
     },
     render_asset::RenderAssets,
     render_phase::{
@@ -83,13 +83,13 @@ use bevy::{
       ViewSortedRenderPhases,
     },
     render_resource::{
-      Buffer, BufferInitDescriptor, BufferUsages, PipelineCache,
-      RenderPipelineDescriptor, ShaderType, SpecializedComputePipeline,
+      Buffer, BufferDescriptor, BufferInitDescriptor, BufferUsages,
+      PipelineCache, RenderPipelineDescriptor, ShaderType,
       SpecializedMeshPipeline, SpecializedMeshPipelineError,
-      SpecializedMeshPipelines, SpecializedRenderPipeline, VertexAttribute,
-      VertexBufferLayout, VertexFormat, VertexStepMode,
+      SpecializedMeshPipelines, VertexAttribute, VertexBufferLayout,
+      VertexFormat, VertexStepMode,
     },
-    renderer::RenderDevice,
+    renderer::{RenderDevice, RenderQueue},
     sync_world::MainEntity,
     view::{ExtractedView, NoFrustumCulling},
     Render, RenderApp, RenderSet,
@@ -104,7 +104,7 @@ fn get_random_ft(x: f32, y: f32) -> f32 {
   let mut rng = rand::thread_rng();
   between.sample(&mut rng)
 }
-/// This example uses a shader source file from the assets subdirectory
+
 const SHADER_ASSET_PATH: &str = "shaders/instancing.wgsl";
 
 fn main() {
@@ -115,35 +115,33 @@ fn main() {
 }
 
 fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
+  // Build a single mesh to be instanced many times.
   commands.spawn((
-    Mesh3d(meshes.add(Sphere { radius: 0.1 })),
+    Mesh3d(meshes.add(SphereMeshBuilder {
+      sphere: Sphere { radius: 0.1 },
+      kind: bevy::render::mesh::SphereKind::Uv { sectors: 2, stacks: 2 },
+    })),
     InstanceMaterialData(
-      (1..=1000)
+      (1..=4132)
         .flat_map(|x| {
-          (1..=1000).map(move |y| (x as f32 / 10.0, y as f32 / 10.0))
+          (1..=4132).map(move |y| (x as f32 / 10.0, y as f32 / 10.0))
         })
-        .map(|(_, _)| InstanceData {
+        .map(|_| InstanceData {
           position: Vec3::new(
-            get_random_ft(-100.0, 100.0),
-            get_random_ft(-100.0, 100.0),
-            get_random_ft(-100.0, 100.0),
+            get_random_ft(-500.0, 500.0),
+            get_random_ft(-500.0, 500.0),
+            get_random_ft(-500.0, 500.0),
           ),
           scale: 1.0,
           color: Color::WHITE.to_srgba().to_f32_array(),
         })
         .collect(),
     ),
-    // NOTE: Frustum culling is done based on the Aabb of the Mesh and the GlobalTransform.
-    // As the cube is at the origin, if its Aabb moves outside the view frustum, all the
-    // instanced cubes will be culled.
-    // The InstanceMaterialData contains the 'GlobalTransform' information for this custom
-    // instancing, and that is not taken into account with the built-in frustum culling.
-    // We must disable the built-in frustum culling by adding the `NoFrustumCulling` marker
-    // component to avoid incorrect culling.
-    //NoFrustumCulling,
+    // Consider leaving NoFrustumCulling if you plan GPU-based culling.
+    // NoFrustumCulling,
   ));
 
-  // camera
+  // Camera setup remains unchanged.
   commands.spawn((
     Transform::from_translation(Vec3::new(0.0, 1.5, 5.0)),
     PanOrbitCamera::default(),
@@ -158,7 +156,10 @@ impl ExtractComponent for InstanceMaterialData {
   type QueryFilter = ();
   type Out = Self;
 
-  fn extract_component(item: QueryItem<'_, Self::QueryData>) -> Option<Self> {
+  fn extract_component(
+    item: QueryItem<'_, Self::QueryData>,
+  ) -> Option<Self::Out> {
+    // In a performance‑critical scenario, you might avoid cloning by using a shared reference.
     Some(InstanceMaterialData(item.0.clone()))
   }
 }
@@ -194,53 +195,30 @@ struct InstanceData {
   color: [f32; 4],
 }
 
-#[allow(clippy::too_many_arguments)]
-fn queue_custom(
-  transparent_3d_draw_functions: Res<DrawFunctions<Transparent3d>>,
-  custom_pipeline: Res<CustomPipeline>,
-  mut pipelines: ResMut<SpecializedMeshPipelines<CustomPipeline>>,
-  pipeline_cache: Res<PipelineCache>,
-  meshes: Res<RenderAssets<RenderMesh>>,
-  render_mesh_instances: Res<RenderMeshInstances>,
-  material_meshes: Query<(Entity, &MainEntity), With<InstanceMaterialData>>,
-  mut transparent_render_phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
-  views: Query<(Entity, &ExtractedView, &Msaa)>,
+//
+// Modified prepare_instance_buffers: Instead of always recreating the buffer,
+// we check if an InstanceBuffer already exists and update it.
+fn prepare_instance_buffers(
+  mut commands: Commands,
+  query: Query<(Entity, &InstanceMaterialData, Option<&InstanceBuffer>)>,
+  render_device: Res<RenderDevice>,
+  render_queue: Res<RenderQueue>,
 ) {
-  let draw_custom = transparent_3d_draw_functions.read().id::<DrawCustom>();
-
-  for (view_entity, view, msaa) in &views {
-    let Some(transparent_phase) =
-      transparent_render_phases.get_mut(&view_entity)
-    else {
-      continue;
-    };
-
-    let msaa_key = MeshPipelineKey::from_msaa_samples(msaa.samples());
-
-    let view_key = msaa_key | MeshPipelineKey::from_hdr(view.hdr);
-    let rangefinder = view.rangefinder3d();
-    for (entity, main_entity) in &material_meshes {
-      let Some(mesh_instance) =
-        render_mesh_instances.render_mesh_queue_data(*main_entity)
-      else {
-        continue;
-      };
-      let Some(mesh) = meshes.get(mesh_instance.mesh_asset_id) else {
-        continue;
-      };
-      let key = view_key
-        | MeshPipelineKey::from_primitive_topology(mesh.primitive_topology());
-      let pipeline = pipelines
-        .specialize(&pipeline_cache, &custom_pipeline, key, &mesh.layout)
-        .unwrap();
-      transparent_phase.add(Transparent3d {
-        entity: (entity, *main_entity),
-        pipeline,
-        draw_function: draw_custom,
-        distance: rangefinder.distance_translation(&mesh_instance.translation),
-        batch_range: 0..1,
-        extra_index: PhaseItemExtraIndex::NONE,
-      });
+  for (entity, instance_data, maybe_buffer) in query.iter() {
+    let new_data = bytemuck::cast_slice(instance_data.as_slice());
+    if let Some(buffer_component) = maybe_buffer {
+      // Use RenderQueue to update the buffer data
+      render_queue.write_buffer(&buffer_component.buffer, 0, new_data);
+    } else {
+      let buffer =
+        render_device.create_buffer_with_data(&BufferInitDescriptor {
+          label: Some("instance data buffer"),
+          contents: new_data,
+          usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+        });
+      commands
+        .entity(entity)
+        .insert(InstanceBuffer { buffer, length: instance_data.len() });
     }
   }
 }
@@ -249,23 +227,6 @@ fn queue_custom(
 struct InstanceBuffer {
   buffer: Buffer,
   length: usize,
-}
-
-fn prepare_instance_buffers(
-  mut commands: Commands,
-  query: Query<(Entity, &InstanceMaterialData)>,
-  render_device: Res<RenderDevice>,
-) {
-  for (entity, instance_data) in &query {
-    let buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
-      label: Some("instance data buffer"),
-      contents: bytemuck::cast_slice(instance_data.as_slice()),
-      usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
-    });
-    commands
-      .entity(entity)
-      .insert(InstanceBuffer { buffer, length: instance_data.len() });
-  }
 }
 
 #[derive(Resource)]
@@ -277,7 +238,6 @@ struct CustomPipeline {
 impl FromWorld for CustomPipeline {
   fn from_world(world: &mut World) -> Self {
     let mesh_pipeline = world.resource::<MeshPipeline>();
-
     CustomPipeline {
       shader: world.load_asset(SHADER_ASSET_PATH),
       mesh_pipeline: mesh_pipeline.clone(),
@@ -294,16 +254,17 @@ impl SpecializedMeshPipeline for CustomPipeline {
     layout: &MeshVertexBufferLayoutRef,
   ) -> Result<RenderPipelineDescriptor, SpecializedMeshPipelineError> {
     let mut descriptor = self.mesh_pipeline.specialize(key, layout)?;
-
+    // Use the custom shader for both vertex and fragment stages.
     descriptor.vertex.shader = self.shader.clone();
+    // Add an instance buffer layout.
     descriptor.vertex.buffers.push(VertexBufferLayout {
-      array_stride: size_of::<InstanceData>() as u64,
+      array_stride: std::mem::size_of::<InstanceData>() as u64,
       step_mode: VertexStepMode::Instance,
       attributes: vec![
         VertexAttribute {
           format: VertexFormat::Float32x4,
           offset: 0,
-          shader_location: 3, // shader locations 0-2 are taken up by Position, Normal and UV attributes
+          shader_location: 3,
         },
         VertexAttribute {
           format: VertexFormat::Float32x4,
@@ -347,7 +308,6 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMeshInstanced {
     >,
     pass: &mut TrackedRenderPass<'w>,
   ) -> RenderCommandResult {
-    // A borrow check workaround.
     let mesh_allocator = mesh_allocator.into_inner();
 
     let Some(mesh_instance) =
@@ -378,7 +338,6 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMeshInstanced {
         else {
           return RenderCommandResult::Skip;
         };
-
         pass.set_index_buffer(
           index_buffer_slice.buffer.slice(..),
           0,
@@ -396,5 +355,55 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMeshInstanced {
       }
     }
     RenderCommandResult::Success
+  }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn queue_custom(
+  transparent_3d_draw_functions: Res<DrawFunctions<Transparent3d>>,
+  custom_pipeline: Res<CustomPipeline>,
+  mut pipelines: ResMut<SpecializedMeshPipelines<CustomPipeline>>,
+  pipeline_cache: Res<PipelineCache>,
+  meshes: Res<RenderAssets<RenderMesh>>,
+  render_mesh_instances: Res<RenderMeshInstances>,
+  material_meshes: Query<(Entity, &MainEntity), With<InstanceMaterialData>>,
+  mut transparent_render_phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
+  views: Query<(Entity, &ExtractedView, &Msaa)>,
+) {
+  let draw_custom = transparent_3d_draw_functions.read().id::<DrawCustom>();
+
+  for (view_entity, view, msaa) in &views {
+    let Some(transparent_phase) =
+      transparent_render_phases.get_mut(&view_entity)
+    else {
+      continue;
+    };
+
+    let msaa_key = MeshPipelineKey::from_msaa_samples(msaa.samples());
+    let view_key = msaa_key | MeshPipelineKey::from_hdr(view.hdr);
+    let rangefinder = view.rangefinder3d();
+    for (entity, main_entity) in &material_meshes {
+      let Some(mesh_instance) =
+        render_mesh_instances.render_mesh_queue_data(*main_entity)
+      else {
+        continue;
+      };
+      let Some(mesh) = meshes.get(mesh_instance.mesh_asset_id) else {
+        continue;
+      };
+      let key = view_key
+        | MeshPipelineKey::from_primitive_topology(mesh.primitive_topology());
+      let pipeline = pipelines
+        .specialize(&pipeline_cache, &custom_pipeline, key, &mesh.layout)
+        .unwrap();
+      transparent_phase.add(Transparent3d {
+        entity: (entity, *main_entity),
+        pipeline,
+        draw_function: draw_custom,
+        distance: rangefinder.distance_translation(&mesh_instance.translation),
+        batch_range: 0..1,
+        extra_index: PhaseItemExtraIndex::NONE,
+      });
+    }
   }
 }
